@@ -1,0 +1,638 @@
+---
+title: "Homework 1"
+author: "Ivan Lopez"
+format: html
+editor: visual
+---
+
+```{r}
+
+library(tidyverse)
+library(here)
+library(tictoc)
+library(furrr)    # Like purr but for functional programming
+library(foreign) # To read .dbf files.
+
+```
+
+## EXERCISE 1
+
+Here we will practice with `dplyr` and other `tidyverse` packages. The `dbf` files you encounter here contain **death records** across rows, and a variety of variables describing the event. We want to work with homicides.
+
+1.  Get the paths to the `dbf` files completing the code below:
+
+```{r}
+
+  # task: Extract all the files with "DEFUN" (ignore case).
+  # grepl("DEF", temp_clean_1,fixed=F, ignore.case=T) get us everything with
+  # a "DEF" on it.
+
+# Get the files names
+temp = list.files(here('data'))
+
+# Get the positions of those files with the "DEF" prefix.
+indices = grepl("DEF", temp, fixed = FALSE, ignore.case = TRUE)
+
+# Get the files with the "DEF" prefix.
+my_files = temp[indices]
+
+# Get the paths to the files with the "DEF" prefix.
+my_paths = paste("./data", my_files, sep = "/")
+
+
+
+```
+
+2.  Extract the data. To complete this part we will use `purrr` and `furrr` .
+
+    We will store the resulting dataframes in a list.
+
+```{r}
+
+ plan(multisession, workers = 2) # You can increase the invoked cores according to your                                     computer's capabilities (paralell programing AKA PP)
+  
+  tic() # record the execution time.
+  
+  list_dbf = my_files %>% # my_files contains the location of DEF files. 
+    
+    purrr::set_names() %>%    # creates a named array using the array contents.
+    
+    furrr::future_map(function(x){ # Just like the regular map but with PP
+      
+        outcome = read.dbf(my_paths[grep(x, my_paths, ignore.case = TRUE)],as.is = TRUE) %>% # read each file and creates dfs
+                                               # filter each df
+        filter(.,PRESUNTO==2|PRESUNTO==5)})    # This filters out non-homicides
+  
+  toc()
+  
+  plan(sequential) # Here we end the paralell programming process.
+
+```
+
+3.  Take the list from above and construct a single "huge" dataset.
+
+```{r}
+
+  # list_dbf contains all the dfs with deceases.
+  
+  def_df = data.table::rbindlist(
+    
+    list_dbf, 
+    
+    fill = T, # Each time it detects a new variable, it creates a
+    # new column and fills all the previous contents with NAs.
+    
+    idcol="file") %>% # this identifies each observation.
+    
+    # binds the df across rows. 
+    
+    as_tibble()
+  
+  
+```
+
+4.  Create suitable geographic ids as follows:
+
+-   All the variables starting with 'ENT\_'/'MUN\_' refer to Mexican states/municipalities. Transform all these variables to numeric values.
+
+-   Create 'character' state-level ids as follows:
+
+    -   If the state code is below 10, prepend a '0' to it.
+
+        -   Otherwise leave it as is.
+
+    -   If the municipality code is below 10, prepend '00' to it.
+
+        -   If it is between 10 and 99, prepend '0'.
+
+        -   Otherwise leave it as is.
+
+-   Finally paste with `paste0` the municipality and state ids.
+
+    -   Specifically,
+
+        `idmunocurr = paste0(ENT_OCURR,MUN_OCURR),` This is the victim's home municipality.
+
+        `idmunresid = paste0(ENT_RESID,MUN_RESID)` This is the the municipality where the crime to0k place.
+
+```{r}
+
+def_df = def_df %>% 
+  mutate(across(
+    
+    contains(c("ENT_","MUN_")),
+    
+    function(x){as.numeric(x)}),
+    
+    )
+  
+  
+  # geographic ids --------------------------------------------------------------
+  
+  # Below we use across to select id variables to set them in the right format
+  # using case_when.
+  
+  def_df = def_df %>%  
+    mutate(
+      
+      across(contains("ENT_"), function(x){
+        
+        x = case_when(
+          
+          x<10 ~ paste("0",as.character(x),sep=""),
+          TRUE ~ as.character(x)
+          
+        )}
+      )) %>%  
+  
+    mutate(
+      
+      across(contains("MUN_"), function(x){
+        
+        x = case_when(
+          
+          x<10 ~ paste("00",as.character(x),sep=""),
+          between(x, 10, 99) ~ paste("0",as.character(x),sep=""),
+          TRUE ~ as.character(x)
+          
+        )}
+      )) %>% 
+    
+    mutate( idmunocurr = paste0(ENT_OCURR,MUN_OCURR),
+            idmunresid = paste0(ENT_RESID,MUN_RESID)) %>% 
+  
+  select(idmunocurr,
+         idmunresid,
+         year = ANIO_OCUR,
+         cause = PRESUNTO
+         ) %>% 
+  
+  filter(cause==2,
+         between(year,2006,2009)
+         ) %>%  # Get the homicides only.
+  select(-cause)
+
+
+
+```
+
+5.  Create a panel data structure by:
+    -   Nesting the data by municipality of occurrence.
+
+    -   Computing the number of homicides per municipality-year across the list-column created above.
+
+```{r}
+
+new_df = def_df %>% 
+  
+  group_by(idmunocurr) %>% 
+  
+  nest() %>% 
+  
+  ungroup() %>% 
+  
+  mutate(mun_year = map(data, function(x)
+    
+    x %>% group_by(year) %>% summarise(homicides = n())
+    
+    )) %>% 
+  
+  unnest(mun_year) %>% 
+  
+  select(-data)
+
+new_df
+```
+
+```{r}
+
+# You should arrive to the output from the code below:
+
+my_df = def_df %>% 
+  
+  group_by(idmunocurr,year) %>% 
+  
+  summarise(homicides = n())
+  
+my_df
+```
+
+## EXERCISE 2
+
+Text analysis gives researchers a powerful set of tools for extracting general information from a large body of documents.
+
+This exercise is based on Gentzkow, M. and Shapiro, J. M. 2010. "[What Drives Media Slant? Evidence From U.S. Daily Newspapers](http://dx.doi.org/10.3982/ECTA7195)." *Econometrica* 78(1): 35--71.
+
+We will analyze data from newspapers across the country to see what topics they cover and how those topics are related to their ideological bias. The authors computed a measure of a newspaper's "slant" by comparing its language to speeches made by Democrats and Republicans in the U.S. Congress.
+
+You will use three data sources for this analysis. The first, `dtm`, is a document term matrix with one row per newspaper, containing the 1000 phrases -- stemmed and processed -- that do the best job of identifying the speaker as a Republican or a Democrat. For example, "living in poverty" is a phrase most frequently spoken by Democrats, while "global war on terror" is a phrase most frequently spoken by Republicans; a phrase like "exchange rate" would not be included in this dataset, as it is used often by members of both parties and is thus a poor indicator of ideology.
+
+The second object, `papers`, contains some data on the newspapers on which `dtm` is based. The row names in `dtm` correspond to the `newsid` variable in `papers`. The variables are:
+
+| Name       | Description                                                               |
+|------------|---------------------------------------------------------------------------|
+| `newsid`   | The newspaper ID                                                          |
+| `paper`    | The newspaper name                                                        |
+| `city`     | The city in which the newspaper is based                                  |
+| `state`    | The state in which the newspaper is based                                 |
+| `district` | Congressional district where the newspaper is based (data for Texas only) |
+| `nslant`   | The "ideological slant" (lower numbers mean more Democratic)              |
+
+The third object, `cong`, contains data on members of Congress based on their political speech, which we will compare to the ideological slant of newspapers from the areas that these legislators represent. The variables are:
+
+| Name       | Description                                                                         |
+|------------|-------------------------------------------------------------------------------------|
+| `legname`  | Legislator's name                                                                   |
+| `state`    | Legislator's state                                                                  |
+| `district` | Legislator's Congressional district                                                 |
+| `chamber`  | Chamber in which legislator serves (House or Senate)                                |
+| `party`    | Legislator's party                                                                  |
+| `cslant`   | Ideological slant based on legislator's speech (lower numbers mean more Democratic) |
+
+#### Question 1
+
+We will first focus on the slant of newspapers, which the authors define as the tendency to use language that would sway readers to the political left or right. Load the data and plot the distribution of `nslant` in the `papers` data frame, with a vertical line at the median. Which newspaper in the country has the largest left-wing slant? What about right?
+
+```{r}
+load(here('data', 'newspapers.RData'))
+
+library(ggplot2)
+
+
+ggplot(papers, aes(x = nslant)) +
+  geom_histogram(binwidth = 1, fill = "blue", color = "black", alpha = 0.7) +
+  geom_vline(aes(xintercept = median(nslant)), col = "red", linetype = "dashed", linewidth = 1) +
+  labs(title = "Distribution of nslant in Newspapers",
+       x = "left-right",
+       y = "Frequency (count)") +
+  theme_minimal()
+
+# largest rigth
+print(papers$paper[which.max(papers$nslant)])
+# largest left
+print(papers$paper[which.min(papers$nslant)])
+```
+
+#### Question 2
+
+We will explore the content of these newspapers using the `wordcloud` package.
+
+First load the `wordcloud` package. Make a word cloud of the top words (at most 20) in the `dtm` object. What were the biggest topics in the news in 2005 when these data were collected? Hint: first convert `dtm` into a `matrix`.
+
+Now subset the data to the tenth of newspapers with the leftmost (lowest) political slant and the rightmost (highest) political slant. Make two word clouds showing the words most commonly used by each group of newspapers (again, at most 20 words). How does their language differ? Do they have anything in common? Hint: to use your usual subsetting/indexing tools, convert your dtm matrix into a data frame using the `data.frame` function.
+
+Pay close attention to your warnings, as they contain important information. For extra credit, see if you can make them go away.
+
+```{r}
+
+library(wordcloud)
+library(dplyr)
+library(slam)
+
+dtm_matrix <- as.matrix(dtm)
+
+term_freq <- col_sums(dtm_matrix)
+
+wordcloud(words = names(term_freq), freq = term_freq, max.words = 20, scale = c(3, 0.5), colors = brewer.pal(8, "Set2"))
+
+```
+
+```{r}
+left_cutoff <- papers[papers$nslant < 0.5, ]
+right_cutoff <- papers[papers$nslant > 0.5, ]
+
+left_newspapers <- papers[papers$nslant <= left_cutoff, ]
+right_newspapers <- papers[papers$nslant >= right_cutoff, ]
+
+dtm_left <- dtm_matrix[rownames(dtm_matrix) %in% left_newspapers$newsid, ]
+dtm_right <- dtm_matrix[rownames(dtm_matrix) %in% right_newspapers$newsid, ]
+
+word_freq_left <- colSums(dtm_left)
+word_freq_right <- colSums(dtm_right)
+
+wordcloud(names(word_freq_left), word_freq_left, max.words = 20,scale=c(1.5,0.5), colors = brewer.pal(8, "Set2"))
+wordcloud(names(word_freq_right), word_freq_right, max.words = 20, scale=c(1.5,0.5), colors = brewer.pal(8, "Set2"))
+```
+
+#### Question 3
+
+We will now explore the relationship between the political slant of newspapers and the language used by members of Congress.
+
+Using the dataset `cong`, compute average slant by state separately for the House and Senate. Now use `papers` to compute the average newspaper slant by state. Make two plots with Congressional slant on the x-axis and newspaper slant on the y-axis -- one for the House, one for the Senate. Include a best-fit line in each plot -- a red one for the Senate and a green one for the House. Label your axes, title your plots, and make sure the axes are the same for comparability. Can you conclude that newspapers are influenced by the political language of elected officials? How else can you interpret the results?
+
+Answer: From best-fitted lines and distribution of values, one can state that newspapers are influenced by the political language of elected officials since best-fitted lines and distribution of values are different than each other on different graphs.
+
+```{r}
+library(dplyr)
+library(ggplot2)
+
+avg_cong_slant <- cong %>%
+                  group_by(state, chamber) %>%
+                  summarise(avg_cslant = mean(cslant, na.rm = TRUE))
+
+avg_newspaper_slant <- papers %>%
+                       group_by(state) %>%
+                       summarise(avg_nslant = mean(nslant, na.rm = TRUE))
+
+house_data <- merge(avg_cong_slant[avg_cong_slant$chamber == "H", ], avg_newspaper_slant, by = "state")
+senate_data <- merge(avg_cong_slant[avg_cong_slant$chamber == "S", ], avg_newspaper_slant, by = "state")
+
+ggplot(house_data, aes(x = avg_cslant, y = avg_nslant)) +
+  geom_point() +
+  geom_smooth(method = "lm", color = "green") +
+  labs(title = "House - Newspaper",
+       x = "House Average",
+       y = "Newspaper Average") +
+  theme_minimal()
+
+
+ggplot(senate_data, aes(x = avg_cslant, y = avg_nslant)) +
+  geom_point() +
+  geom_smooth(method = "lm", color = "red") +
+  labs(title = "Senate - Newspaper",
+       x = "Senate Average",
+       y = "Newspaper Average") +
+  theme_minimal()
+```
+
+#### Question 4
+
+We will now take a closer look at the relationship between congressional and media slant at the district level, for one particular state -- Texas. To do so, subset the two datasets to Texas alone, then merge them by district and state, keeping only the observations that appear in both datasets. Then, produce the same plot as in question 3 above, but at the district level (just for the House). What do you find? Which results do you think are more informative, and why?
+
+I found out that texas house affects less than average to newspaper slant since line is steeper. I think it is less informative than other since there is less data and also more specific. However, it may be more informative for STATE level.
+
+```{r}
+
+texas_cong <- filter(cong, state == "TX")
+texas_papers <- filter(papers, state == "TX")
+cong_papers_d_join <- merge(texas_cong, texas_papers, by = c("state", "district"))
+
+ggplot(merged_data %>% filter(chamber == "H"), aes(x = cslant, y = nslant)) +
+  geom_point() +
+  geom_smooth(method = "lm", color = "blue") +
+  labs(title = "Texas House - Newspaper",
+       x = "Texas House Average",
+       y = "Newspaper Average") +
+  theme_minimal()
+```
+
+#### Question 5
+
+Identify the most important terms for capturing regional variation in what is considered newsworthy -- the terms that appear frequently in some documents, but not across all documents. To do so, compute the *term frequency-inverse document frequency (tf-idf)* for each phrase and newspaper combination in the dataset (for this, use the `tm` package and the `dtm` object originally provided).
+
+Subset the tf-idf transformed matrix you created to contain the newspaper closest to Princeton, the "Home News Tribune" of East Brunswick, NJ. Print the terms with the largest tf-idf in decreasing order. What topics are of interest to our region, but not likely to make the national news?
+
+Answer: Our region Is talking about adult-children relationship, some races like asian american, taxes and safety while others are not.
+
+```{r}
+library(dplyr)
+library(tidytext)
+
+dtm_tidy <- dtm_matrix %>%
+  as.data.frame() %>%
+  rownames_to_column(var = "document") %>%
+  gather(term, count, -document) %>%
+  filter(count > 0) 
+
+dtm_tfidf <- dtm_tidy %>%
+  bind_tf_idf(term, document, count) 
+
+dtm_tfidf %>% arrange(desc(tf_idf))
+
+home_news_tribune_tfidf <- dtm_tfidf %>%  filter(document == 911) %>%
+  arrange(desc(tf_idf))
+
+# Print the terms with the largest TF-IDF
+print(home_news_tribune_tfidf)
+```
+
+## EXERCISE 3
+
+#### Question 1
+
+You will be working with Mexican homicide data. Load `'homicides_data.RData'`. The column `id_murder` identifies a homicide victim. Across columns there are different variables related to the victims. Unfortunately, the names are in Spanish. Let's redefine the variables as follows.
+
+```{r}
+
+load(here('data', 'homicides_data.RData'))
+
+library(tidymodels)
+
+# codify your covariates:
+
+homicides_data = homicides_data %>% 
+  
+  mutate(
+    
+    # did the injury happened outdoors?
+    
+    v_inj_outdoor = if_else(LUGAR_OCUR== 4 | LUGAR_OCUR== 7,1,0),
+    
+    # did the person passed outdoors?
+    
+    v_dth_outdoor = if_else(LUGAR_OCUR == 10, 1, 0),
+    
+    # Was the victim married?
+    
+    v_single = if_else(EDO_CIVIL == 1,1,0),
+    
+    # Did the victim graduated from secondary school?
+    
+    v_second = if_else(ESCOLARIDA >= 6,1,0),
+    
+    # Did the person work in transportation or operating machinnery?
+    
+    v_transp_mach = if_else(OCUPACION == 8, 1,0),
+    
+    # Was the victim a male?
+    
+    v_male = if_else(SEXO == 1,1,0),
+    
+    # Was the victim younger than 30 years old?
+    
+    v_young = if_else(EDAD_AGRU <11,1,0)
+    
+  )-> homicides_clean
+
+
+```
+
+Now. you need to create another variable, `v_gun`, indicating if the person was killed with a fire arm. To do that, use the vector `gun_cause` which contains the the variable `CAUSA_DEF` values that correspond to aggressions with firearms. Next, select `ANIO_OCUR` and relabel it as `year`, and all the variables starting with `'id'`, and all those starting with `'v_'`.
+
+```{r}
+
+
+# Let's identify the gun-caused events:
+
+gun_cause = c("9650","9651","9652","9653","9654","X930","X931","X932","X933",
+                  "X934","X935","X936","X937","X938","X939","X940","X941","X942",
+                  "X943","X944","X945","X946","X947","X948","X949","X950","X951",
+                  "X952","X953","X954","X955","X956","X957","X958","X959") 
+
+homicides_clean = homicides_clean %>% 
+  
+  mutate(
+    
+ v_gun= as.numeric(grepl(paste(gun_cause, collapse="|"), CAUSA_DEF, ignore.case = TRUE))
+    
+  ) 
+homicides_clean <- homicides_clean %>%
+  select(
+    year = ANIO_OCUR,
+    starts_with("id"),
+    starts_with("v_")
+  )
+
+
+```
+
+```{r}
+homicides_clean
+```
+
+#### Question 2
+
+Sadly, many times the authorities do not report whether what type of device lead to the victim's death. The involvement of firearms is often an indication of organized crime participation, in which case the government should intervene timely through the deployment of the army or elite police forces. We would like to have an accurate model capable of predicting variable `v_gun` . To that end, train a logistic regression and a random forest on `homicides_clean` . You can use a few or all the variables besides `v_gun` as predictors. Make sure you follow all the steps we discussed in class (i.e. initial split, folding, cross validation, model selection, etc). Please indicate what metric you chose to evaluate between both procedures, and explain the motives behind your selection.
+
+```{r}
+library(ranger)
+set.seed(42)
+
+splitted_data <- initial_split(data = homicides_clean, prop=0.7)
+# 80% training + validation, 20% testing
+training_data <- training(splitted_data)
+testing_data <- testing(splitted_data)
+if(length(training_data) == 0 || length(testing_data) == 0)
+{
+  stop("Not able to split data") 
+}
+# 5 CV sets
+cv_split <- vfold_cv(training_data, v=5)
+if(length(cv_split$splits) == 0)
+{
+  stop("CV is unsuccessful")
+}
+
+```
+
+```{r}
+models <- cv_split %>% 
+  mutate(
+    train = map(splits, ~training(.x)),
+    validate = map(splits, ~testing(.x))
+  )
+models <- models %>% 
+  mutate(
+    lr = 
+      map(train, ~glm(
+      formula = v_gun ~ v_young + v_male + v_inj_outdoor + v_single,
+      data = .x,
+      family = "binomial"
+    )),
+    rf = map(train, ~ranger(
+      formula=v_gun ~ v_young + v_male + v_inj_outdoor + v_single,
+      data = .x
+      ))
+  )
+```
+
+```{r}
+models
+```
+
+```{r}
+library(dplyr)
+library(purrr)
+library(Metrics)
+
+
+if(length(models$lr) != length(models$rf) || length(models$lr) != length(models$validate)) {
+  stop("Mismatch in lengths of models and validation sets")
+}
+
+
+all_folds_validated <- list()
+
+for(i in seq_along(models$lr)) {
+
+  model_lr <- models$lr[[i]]
+  model_rf <- models$rf[[i]]
+  validate_data <- models$validate[[i]]
+
+
+  predictions_lr <- predict(model_lr, validate_data, type = "response")
+  predictions_rf <- predict(model_rf, validate_data)$predictions
+
+  validate_data$prediction_lr <- factor(ifelse(predictions_lr > 0.6, 1, 0), levels=c(0,1))
+  validate_data$prediction_rf <- ifelse(predictions_rf > 0.6, 1, 0)
+  validate_data$actual <- factor(validate_data$v_gun, levels=c(0,1))
+
+
+  all_folds_validated[[i]] <- validate_data
+
+}
+all_folds_validated_df <- bind_rows(all_folds_validated)
+
+head(all_folds_validated)
+
+```
+
+```{r}
+precision_lr <- numeric(length(all_folds_validated))
+recall_lr <- numeric(length(all_folds_validated))
+precision_rf <- numeric(length(all_folds_validated))
+recall_rf <- numeric(length(all_folds_validated))
+
+for (i in seq_along(all_folds_validated)) {
+  fold_data <- all_folds_validated[[i]]
+
+  actual_numeric <- as.numeric(as.character(fold_data$actual))
+  
+  precision_lr[i] <- precision(actual_numeric, fold_data$prediction_lr)
+  recall_lr[i] <- Metrics::recall(actual_numeric, as.numeric(as.character(fold_data$prediction_lr)))
+
+
+  precision_rf[i] <- precision(actual_numeric, fold_data$prediction_rf)
+  recall_rf[i] <- recall(actual_numeric, fold_data$prediction_rf)
+}
+
+
+mean_precision_lr <- mean(precision_lr, na.rm = TRUE)
+mean_recall_lr <- mean(recall_lr, na.rm = TRUE)
+mean_precision_rf <- mean(precision_rf, na.rm = TRUE)
+mean_recall_rf <- mean(recall_rf, na.rm = TRUE)
+
+print(paste("Mean Precision LR:", mean_precision_lr))
+print(paste("Mean Recall LR:", mean_recall_lr))
+print(paste("Mean Precision RF:", mean_precision_rf))
+print(paste("Mean Recall RF:", mean_recall_rf))
+```
+
+I think using Recall should be the case here because we do not want actual v_gun estimations, instead we are looking for false-negatives here. Therefore, We will use recall as the score metric. As one can see, we have more recall in rf, therefore we have chosen rf algorithm.
+
+```{r}
+
+rf_model <- ranger(
+  formula = v_gun ~ v_young + v_male + v_inj_outdoor + v_single,
+  data = training_data,
+  probability = TRUE
+)
+
+predictions <- predict(rf_model, testing_data)$predictions
+predictions <- ifelse(predictions > 0.5, 1, 0)
+actual <- as.numeric(as.character(testing_data$v_gun))
+
+
+recall_rf <- recall(actual, predictions)
+
+
+
+print(paste("Recall (RF):", recall_rf))
+
+```
+
+As one can estimate, recall is lower now and it didnt give us what we wanted. 0.5 for a binary varible is pretty low.
+
+```{r}
+
+```
